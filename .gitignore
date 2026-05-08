@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+voice_typer.log
+_setup_test.log
+*.log
+
+# Distribution archives
+*.zip
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
