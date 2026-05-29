@@ -2,13 +2,14 @@
 
 Offline Russian voice dictation for Windows. Hold a hotkey, speak, release — recognized text is pasted at the cursor in any application: browser, IDE, Word, Telegram, anywhere.
 
-Speech recognition runs locally via the [GigaAM v2](https://github.com/salute-developers/GigaAM) RNNT model (int8-quantized ONNX) on ONNX Runtime with DirectML acceleration. Works on AMD/Intel integrated graphics and falls back to CPU automatically. No cloud, no telemetry, no internet required after the initial setup.
+Speech recognition runs locally via [GigaAM v3](https://github.com/salute-developers/GigaAM) (ONNX) on ONNX Runtime with DirectML acceleration. The default variant is `gigaam-v3-e2e-rnnt`, which adds **automatic punctuation and text normalization**. You can switch models at runtime from the tray menu (v3 e2e-rnnt / v3 rnnt / v3 ctc / v2 rnnt). The loader auto-negotiates quantization (int8 → fp32) and provider (DirectML → CPU). No cloud, no telemetry, no internet required after the initial setup.
 
 > Distributed as a portable folder with a one-click installer that handles Python, dependencies, and model download.
 
 ## Features
 
 - Push-to-talk hotkey (`Ctrl+Win` by default), with race-safe combo handling
+- Runtime model switching via the tray menu (GigaAM v3 e2e/rnnt/ctc + v2 fallback); loaded models are cached in RAM and the choice persists across restarts
 - System-tray indicator: green (idle) / red pulsing with seconds counter (recording) / blue (processing)
 - Audio cues for start, stop, success, and error
 - Hardware-accelerated inference via DirectML on iGPU; transparent CPU fallback
@@ -21,9 +22,9 @@ Speech recognition runs locally via the [GigaAM v2](https://github.com/salute-de
 ## Requirements
 
 - Windows 10 or 11, x64
-- ~3 GB free disk space (Python runtime + dependencies + model cache)
+- ~5 GB free disk space (Python runtime + dependencies + model cache for all variants)
 - A working microphone
-- Internet connection during initial setup only (~700 MB total downloads)
+- Internet connection during initial setup only (~1.5 GB total downloads for all models)
 
 The installer provisions Python 3.12 via `winget` if it is not already present.
 
@@ -58,7 +59,8 @@ Right-clicking the tray icon opens a menu with **Open log** and **Quit**.
 
 | Script | Purpose |
 |---|---|
-| `setup.bat` / `setup.ps1` | First-time installation: provisions Python, creates a virtualenv, installs packages, downloads the model, performs a warm-up inference |
+| `setup.bat` / `setup.ps1` | First-time installation: provisions Python, creates a virtualenv, installs packages, downloads the models, performs a warm-up inference |
+| `update.bat` / `update.ps1` | Update an existing install in place: upgrades `onnx-asr`/`onnxruntime`, downloads any new models, warms up. Falls back to full setup if no `.venv` exists |
 | `start_silent.vbs` | Launch in background (recommended) |
 | `start.bat` | Launch with a console window (for debugging) |
 | `stop.bat` | Terminate the background process |
@@ -73,11 +75,13 @@ Tunable constants are defined at the top of `voice_typer.py`:
 | Constant | Default | Description |
 |---|---|---|
 | `SAMPLE_RATE` | `16000` | Microphone sampling rate (Hz). GigaAM expects 16 kHz mono |
-| `MAX_SECONDS` | `60` | Maximum recording length; longer audio is truncated |
+| `MAX_SECONDS` | `600` | Absolute recording cap (10 min); longer audio is truncated |
+| `CHUNK_SECONDS` | `90` | Long audio is split into ~this-long pieces (cut at pauses) and recognized sequentially, then joined. Avoids the DirectML self-attention overflow that crashes recognition on very long (~>200 s) single passes |
 | `MIN_SECONDS` | `0.3` | Minimum audio length to trigger recognition |
 | `MIN_HOLD_MS` | `150` | Minimum hotkey hold duration; shorter holds are ignored |
-| `USE_DIRECTML` | `True` | Enable DirectML provider (with CPU fallback) |
 | `ADD_SPACE_BEFORE` | `True` | Prepend a space to pasted text — useful when appending mid-sentence |
+
+The model list, provider choice (`USE_DIRECTML`) and the int8→fp32 / DirectML→CPU loader live in `asr.py` (`MODELS`, `build_providers()`, `load_asr()`). Edit `MODELS` there to add/remove/reorder the models shown in the tray menu; the first entry is the default. `warmup.py` and `voice_typer.py` both consume this list, so they never drift apart.
 
 The hotkey is currently hardcoded to `Ctrl+Win`. To change it, edit the `CTRL_KEYS` and `WIN_KEYS` sets and the `both_down()` predicate in `voice_typer.py`.
 
@@ -88,7 +92,7 @@ voice_typer.py
 ├── UTF-8 self-respawn         (-X utf8 to avoid cp1251 on non-English Windows)
 ├── keyboard.hook              (low-level hook, push-to-talk, race-safe)
 ├── sounddevice                (16 kHz mono float32 input stream)
-├── onnx-asr + onnxruntime-dml (GigaAM v2 RNNT int8)
+├── asr.py + onnx-asr + onnxruntime-dml (GigaAM v3, int8→fp32, switchable)
 ├── pyperclip + simulated Ctrl+V (paste into the focused window)
 └── pystray + Pillow           (tray icon with state-driven animation)
 ```
@@ -125,7 +129,10 @@ If `.venv` is accidentally copied, `setup.bat` detects the broken environment vi
 ```
 gigaam-voice-typer/
 ├── voice_typer.py          # main script (recognition + tray + hotkey)
+├── asr.py                  # shared model list + loader (int8→fp32, DML→CPU)
+├── warmup.py               # download + warm up all configured models
 ├── setup.bat / setup.ps1   # installer
+├── update.bat / update.ps1 # in-place updater for existing installs
 ├── start.bat               # foreground launcher
 ├── start_silent.vbs        # background launcher (pythonw)
 ├── stop.bat                # terminate background process
@@ -142,7 +149,7 @@ gigaam-voice-typer/
 
 - [GigaAM](https://github.com/salute-developers/GigaAM) by Sber — the speech recognition model
 - [onnx-asr](https://github.com/istupakov/onnx-asr) by [@istupakov](https://github.com/istupakov) — the ONNX inference wrapper
-- [istupakov/gigaam-v2-onnx](https://huggingface.co/istupakov/gigaam-v2-onnx) — the ONNX-converted weights used at runtime
+- [istupakov/gigaam-v3-onnx](https://huggingface.co/istupakov/gigaam-v3-onnx) — the ONNX-converted weights used at runtime
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) and DirectML by Microsoft
 
 ## License

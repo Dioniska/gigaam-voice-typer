@@ -23,7 +23,7 @@ Write-Host "================================================" -ForegroundColor C
 Write-Host ""
 Write-Host "This will take 5-15 minutes depending on your network."
 Write-Host "It will download: Python 3.12 (if missing), pip packages (~500 MB),"
-Write-Host "and the GigaAM v2 model (~240 MB)."
+Write-Host "and the GigaAM v3 models (~1 GB total for all variants)."
 Write-Host ""
 
 # --- Step 1: Find or install Python 3.10 / 3.11 / 3.12 ---
@@ -124,44 +124,16 @@ $pkgs = @(
     'pystray',
     'Pillow'
 )
-& $venvPy -m pip install --disable-pip-version-check @pkgs
+& $venvPy -m pip install --upgrade --disable-pip-version-check @pkgs
 if ($LASTEXITCODE -ne 0) { Fail "Failed to install pip packages. See output above." }
 
 Write-Host "All packages installed" -ForegroundColor Green
 
-# --- Step 4: Download model + warmup ---
-Write-Section "Step 4/4: Downloading GigaAM v2 model (~240 MB)"
+# --- Step 4: Download models + warmup (all variants from asr.py) ---
+Write-Section "Step 4/4: Downloading GigaAM v3 models (~1 GB total, first run only)"
 
-$warmupCode = @'
-import os
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-import numpy as np
-import onnx_asr
-
-print("Downloading and initializing model...", flush=True)
-try:
-    m = onnx_asr.load_model(
-        "gigaam-v2-rnnt",
-        quantization="int8",
-        providers=["DmlExecutionProvider", "CPUExecutionProvider"],
-    )
-    print("Provider: DirectML (with CPU fallback)", flush=True)
-except Exception as e:
-    print(f"DirectML unavailable ({e}); using CPU only", flush=True)
-    m = onnx_asr.load_model("gigaam-v2-rnnt", quantization="int8", providers=["CPUExecutionProvider"])
-    print("Provider: CPU", flush=True)
-
-print("Warming up...", flush=True)
-_ = m.recognize(np.zeros(16000, dtype=np.float32))
-print("Model is ready.", flush=True)
-'@
-
-$tmpScript = Join-Path $env:TEMP "gigaam_warmup.py"
-[System.IO.File]::WriteAllText($tmpScript, $warmupCode, [System.Text.UTF8Encoding]::new($false))
-
-& $venvPy -X utf8 $tmpScript
+& $venvPy -X utf8 (Join-Path $PSScriptRoot "warmup.py")
 $warmupExit = $LASTEXITCODE
-Remove-Item $tmpScript -ErrorAction SilentlyContinue
 
 if ($warmupExit -ne 0) {
     Fail "Model download or initialization failed. Check internet connection and try again."

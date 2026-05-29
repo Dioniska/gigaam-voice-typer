@@ -12,12 +12,8 @@ powershell -NoProfile -Command "$s=Join-Path ([Environment]::GetFolderPath('Star
 echo 3. Удаляю виртуальное окружение (.venv)...
 if exist ".venv" rmdir /s /q ".venv"
 
-echo 4. Удаляю кеш модели в %%USERPROFILE%%\.cache\huggingface\hub\models--istupakov--gigaam-v2-onnx
-set MODEL_CACHE=%USERPROFILE%\.cache\huggingface\hub\models--istupakov--gigaam-v2-onnx
-if exist "%MODEL_CACHE%" (
-    set /p del_model="Удалить кеш модели (~240 МБ)? [y/N]: "
-    if /i "%del_model%"=="y" rmdir /s /q "%MODEL_CACHE%"
-)
+echo 4. Удаляю кеш моделей GigaAM (v2 и v3) в %%USERPROFILE%%\.cache\huggingface\hub
+powershell -NoProfile -Command "$h=Join-Path $env:USERPROFILE '.cache\huggingface\hub'; $d=@(Get-ChildItem $h -Directory -Filter 'models--istupakov--gigaam-*' -ErrorAction SilentlyContinue); if ($d.Count -gt 0) { $ans=Read-Host 'Удалить кеш моделей GigaAM (~1 ГБ)? [y/N]'; if ($ans -ieq 'y') { $d | Remove-Item -Recurse -Force; Write-Host 'Кеш моделей удалён.' } } else { Write-Host 'Кеш моделей не найден.' }"
 
 echo.
 echo Готово. Файлы программы (voice_typer.py, .bat, .vbs) остались —

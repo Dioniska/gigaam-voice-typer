@@ -26,7 +26,7 @@ import numpy as np
 import sounddevice as sd
 import keyboard
 import pyperclip
-import onnx_asr
+import asr
 import pystray
 from PIL import Image, ImageDraw, ImageFont
 
@@ -54,28 +54,42 @@ sys.excepthook = _excepthook
 
 # === НАСТРОЙКИ ===
 SAMPLE_RATE      = 16000
-MAX_SECONDS      = 60
+MAX_SECONDS      = 600      # абсолютный потолок записи (10 мин); длиннее — обрезается
+CHUNK_SECONDS    = 90       # длинное аудио режется на куски ~столько секунд и склеивается
 MIN_SECONDS      = 0.3
 MIN_HOLD_MS      = 150
-USE_DIRECTML     = True
 ADD_SPACE_BEFORE = True
+# Список моделей и провайдер (DirectML/CPU) задаются в asr.py
 # ==================
+# Почему чанкинг: GigaAM/DirectML на iGPU падает на очень длинном аудио
+# (self-attention переполняется ~>200 c). Поэтому длинную диктовку режем
+# на безопасные куски по паузам и распознаём по очереди.
 
 CTRL_KEYS = {"ctrl", "left ctrl", "right ctrl"}
 WIN_KEYS  = {"windows", "left windows", "right windows"}
 
-log("Загружаю GigaAM v2 RNNT int8...")
-providers = ["DmlExecutionProvider", "CPUExecutionProvider"] if USE_DIRECTML else ["CPUExecutionProvider"]
-try:
-    model = onnx_asr.load_model("gigaam-v2-rnnt", quantization="int8", providers=providers)
-    log(f"провайдер: {providers[0]}")
-except Exception as e:
-    log(f"DirectML не сработал ({e}); откатываюсь на CPU")
-    model = onnx_asr.load_model("gigaam-v2-rnnt", quantization="int8", providers=["CPUExecutionProvider"])
+# === Модели (переключаются через меню в трее) ===
+_models = {}                       # имя -> загруженная модель (кэш в памяти)
+_model_lock = threading.Lock()
+current_model_name = asr.load_choice()
 
+def get_model(name):
+    """Ленивая загрузка с кэшем: первый раз скачивает/инициализирует,
+    дальше отдаёт из памяти, поэтому переключение мгновенное."""
+    with _model_lock:
+        if name in _models:
+            return _models[name]
+    model, tag = asr.load_asr(name, log=log)
+    with _model_lock:
+        _models[name] = model
+    log(f"загружена {name} [{tag}]")
+    return model
+
+log(f"Загружаю стартовую модель: {current_model_name} ({asr.label_for(current_model_name)})")
+_start_model = get_model(current_model_name)
 log("Прогрев модели...")
-_ = model.recognize(np.zeros(SAMPLE_RATE, dtype=np.float32))
-log("Готов. Зажми Ctrl+Win, говори, отпусти. Выход — через меню в трее.")
+_ = _start_model.recognize(np.zeros(SAMPLE_RATE, dtype=np.float32))
+log("Готов. Зажми Ctrl+Win, говори, отпусти. Модель — в меню трея. Выход — там же.")
 
 # === Иконки трея ===
 ICON_SIZE = 64
@@ -90,6 +104,7 @@ def _get_font(size):
 
 FONT_BIG   = _get_font(38)
 FONT_SMALL = _get_font(28)
+FONT_TINY  = _get_font(24)
 
 def make_static_circle(rgb, size=ICON_SIZE):
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -111,15 +126,20 @@ def render_rec_icon(seconds, pulse_phase, size=ICON_SIZE):
         width=2,
     )
     secs = max(0, int(seconds))
-    text = str(min(secs, 99))
-    font = FONT_BIG if len(text) == 1 else FONT_SMALL
+    text = str(secs)                       # реальные секунды, без потолка 99
+    if len(text) <= 1:
+        font, stroke = FONT_BIG, 2
+    elif len(text) == 2:
+        font, stroke = FONT_SMALL, 2
+    else:
+        font, stroke = FONT_TINY, 1        # 3 цифры (100..600) — мельче и тоньше обводка
     d.text(
         (size / 2, size / 2 + 1),
         text,
         font=font,
         fill=(255, 255, 255, 255),
         anchor="mm",
-        stroke_width=2,
+        stroke_width=stroke,
         stroke_fill=(60, 0, 0, 255),
     )
     return img
@@ -137,7 +157,7 @@ def set_state(mode):
     if mode == "idle":
         try:
             tray_icon.icon = ICON_IDLE
-            tray_icon.title = "GigaAM Voice Typer — ожидание"
+            tray_icon.title = f"GigaAM — {asr.label_for(current_model_name)} (ожидание)"
         except Exception:
             pass
     elif mode == "proc":
@@ -194,6 +214,33 @@ def start_recording():
     set_state("rec")
     log("REC старт")
 
+def _split_on_silence(audio, sr, chunk_len, search=2.0):
+    """Режет длинное аудио на куски ~chunk_len секунд, выбирая точку реза
+    в самом тихом месте в пределах +-search секунд от границы, чтобы не
+    разрывать слова посередине. Возвращает список кусков (numpy float32)."""
+    chunk = int(chunk_len * sr)
+    if len(audio) <= chunk:
+        return [audio]
+    win = int(search * sr)
+    smooth = max(1, int(0.02 * sr))   # сглаживание энергии ~20 мс
+    pieces = []
+    pos = 0
+    n = len(audio)
+    while n - pos > chunk:
+        lo = max(pos + chunk - win, pos + 1)
+        hi = min(pos + chunk + win, n)
+        seg = np.abs(audio[lo:hi])
+        if len(seg) > smooth:
+            cs = np.cumsum(seg)
+            energy = (cs[smooth:] - cs[:-smooth]) / smooth
+            cut = lo + int(np.argmin(energy)) + smooth // 2
+        else:
+            cut = (lo + hi) // 2
+        pieces.append(audio[pos:cut])
+        pos = cut
+    pieces.append(audio[pos:])
+    return pieces
+
 def process_recording(stream, buffer, press_t):
     duration = time.time() - press_t
     try:
@@ -217,11 +264,24 @@ def process_recording(stream, buffer, press_t):
     audio = np.concatenate(buffer).astype(np.float32)
     if len(audio) > SAMPLE_RATE * MAX_SECONDS:
         audio = audio[: SAMPLE_RATE * MAX_SECONDS]
+        log(f"запись длиннее {MAX_SECONDS}s — обрезана до потолка")
 
-    log(f"распознаю {len(audio)/SAMPLE_RATE:.2f}s...")
+    chunks = _split_on_silence(audio, SAMPLE_RATE, CHUNK_SECONDS)
+    total_s = len(audio) / SAMPLE_RATE
+    if len(chunks) > 1:
+        log(f"распознаю {total_s:.1f}s в {len(chunks)} кусках моделью {current_model_name}...")
+    else:
+        log(f"распознаю {total_s:.1f}s моделью {current_model_name}...")
     t0 = time.time()
     try:
-        text = model.recognize(audio)
+        asr_model = get_model(current_model_name)
+        parts = []
+        for i, ch in enumerate(chunks):
+            r = asr_model.recognize(ch)
+            parts.append((r or "").strip())
+            if len(chunks) > 1:
+                log(f"  кусок {i+1}/{len(chunks)} готов")
+        text = " ".join(p for p in parts if p)
     except Exception as e:
         log(f"ошибка распознавания: {e}")
         traceback.print_exc()
@@ -339,8 +399,53 @@ def on_open_log(icon, item):
     except Exception as e:
         log(f"не могу открыть лог: {e}")
 
+def switch_model(name):
+    """Переключение активной модели из меню трея. Только в простое."""
+    if state.get("recording"):
+        log("идёт запись — смена модели отложена")
+        beep(300, 150)
+        return
+    if name == current_model_name and name in _models:
+        return
+
+    def worker():
+        global current_model_name
+        set_state("proc")
+        log(f"переключаю модель -> {name}")
+        try:
+            get_model(name)            # ленивая загрузка + кэш
+        except Exception as ex:
+            log(f"не удалось загрузить {name}: {ex}")
+            beep(300, 250)
+            set_state("idle")
+            return
+        current_model_name = name
+        asr.save_choice(name)
+        if tray_icon is not None:
+            try:
+                tray_icon.title = f"GigaAM — {asr.label_for(name)}"
+                tray_icon.update_menu()
+            except Exception:
+                pass
+        beep(1400, 60)
+        set_state("idle")
+        log(f"активна модель: {name} ({asr.label_for(name)})")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+def _model_menu_item(label, name):
+    return pystray.MenuItem(
+        label,
+        lambda icon, item: switch_model(name),
+        checked=lambda item, n=name: current_model_name == n,
+        radio=True,
+    )
+
+model_menu = pystray.Menu(*[_model_menu_item(label, name) for label, name in asr.MODELS])
+
 menu = pystray.Menu(
     pystray.MenuItem("GigaAM Voice Typer", None, enabled=False),
+    pystray.MenuItem("Модель", model_menu),
     pystray.MenuItem("Открыть лог", on_open_log),
     pystray.Menu.SEPARATOR,
     pystray.MenuItem("Выход", on_quit),
@@ -349,7 +454,7 @@ menu = pystray.Menu(
 tray_icon = pystray.Icon(
     name="gigaam-voice-typer",
     icon=ICON_IDLE,
-    title="GigaAM Voice Typer — ожидание",
+    title=f"GigaAM — {asr.label_for(current_model_name)} (ожидание)",
     menu=menu,
 )
 

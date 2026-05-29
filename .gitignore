@@ -9,6 +9,9 @@ voice_typer.log
 _setup_test.log
 *.log
 
+# Per-machine model choice
+model_config.txt
+
 # Distribution archives
 *.zip
 
