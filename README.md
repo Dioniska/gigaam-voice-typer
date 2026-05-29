@@ -1,5 +1,9 @@
 # GigaAM Voice Typer
 
+[![Release](https://img.shields.io/github/v/release/Dioniska/gigaam-voice-typer)](https://github.com/Dioniska/gigaam-voice-typer/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/Dioniska/gigaam-voice-typer)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
+
 Offline Russian voice dictation for Windows. Hold a hotkey, speak, release — recognized text is pasted at the cursor in any application: browser, IDE, Word, Telegram, anywhere.
 
 Speech recognition runs locally via [GigaAM v3](https://github.com/salute-developers/GigaAM) (ONNX) on ONNX Runtime with DirectML acceleration. The default variant is `gigaam-v3-e2e-rnnt`, which adds **automatic punctuation and text normalization**. You can switch models at runtime from the tray menu (v3 e2e-rnnt / v3 rnnt / v3 ctc / v2 rnnt). The loader auto-negotiates quantization (int8 → fp32) and provider (DirectML → CPU). No cloud, no telemetry, no internet required after the initial setup.
